@@ -1,9 +1,11 @@
+import os
+import re
+import sqlite3
+import logging
+from datetime import datetime
+
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from datetime import datetime
-import sqlite3
-import re
-import logging
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -11,9 +13,11 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# ---------------- TOKEN (Render a ENV theke nibe) ----------------
-import os
+# ---------------- TOKEN ----------------
 TOKEN = os.getenv("BOT_TOKEN")
+
+if not TOKEN:
+    raise Exception("BOT_TOKEN is missing in Render Environment Variables")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("reminders.db", check_same_thread=False, timeout=10)
@@ -97,7 +101,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="✅ Saved!\n⏰ Reminder activated."
         )
 
-# ---------------- REMINDER CHECK ----------------
+# ---------------- CHECK REMINDERS ----------------
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
         now = datetime.now().date()
@@ -134,14 +138,19 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
 
     except Exception as e:
-        print("Error:", e)
+        logging.error(f"Reminder error: {e}")
 
 # ---------------- JOB START ----------------
 def start_jobs(app):
-    app.job_queue.run_repeating(check_reminders, interval=10800, first=10)
+    if app.job_queue:
+        app.job_queue.run_repeating(check_reminders, interval=10800, first=10)
+    else:
+        print("JobQueue not available")
 
 # ---------------- MAIN ----------------
 def main():
+    print("Starting bot...")
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(
