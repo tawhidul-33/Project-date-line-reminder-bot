@@ -13,7 +13,7 @@ logging.basicConfig(
 
 # ---------------- TOKEN (Render a ENV theke nibe) ----------------
 import os
-TOKEN = os.getenv("8774413928:AAGKuXyzG19UJMLrynkbO6j_jQJYbmM58dg")
+TOKEN = os.getenv("BOT_TOKEN")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("reminders.db", check_same_thread=False, timeout=10)
