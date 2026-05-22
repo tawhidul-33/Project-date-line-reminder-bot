@@ -32,7 +32,6 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT,
-    text TEXT,
     date TEXT,
     chat_id INTEGER,
     phase TEXT DEFAULT 'new'
@@ -41,7 +40,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 
 cursor.execute("""
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_reminder
-ON reminders(project, text, date, chat_id)
+ON reminders(project, date, chat_id)
 """)
 
 conn.commit()
@@ -59,29 +58,28 @@ def parse_date(text):
             pass
     return None
 
-# ---------------- PARSE INPUT ----------------
+# ---------------- INPUT PARSER ----------------
 def parse_input(text):
-    match = re.match(r"\[(.*?)\]\s*Delivery date:\s*(.*?)\s*-\s*(.*)", text)
+    match = re.match(r"(.+?)\s+Delivery date:\s*(.+)", text)
     if not match:
         return None
 
     project = match.group(1).strip()
     date_str = match.group(2).strip()
-    task = match.group(3).strip()
 
     date = parse_date(date_str)
     if not date:
         return None
 
-    return project, date, task
+    return project, date
 
 # ---------------- SAVE ----------------
-def save_reminder(project, text, date, chat_id):
+def save_reminder(project, date, chat_id):
     try:
         cursor.execute("""
-            INSERT INTO reminders (project, text, date, chat_id)
-            VALUES (?, ?, ?, ?)
-        """, (project, text, date.strftime("%Y-%m-%d"), chat_id))
+            INSERT INTO reminders (project, date, chat_id)
+            VALUES (?, ?, ?)
+        """, (project, date.strftime("%Y-%m-%d"), chat_id))
 
         conn.commit()
         return True
@@ -99,7 +97,7 @@ def delete_project(project):
 
     return count
 
-# ---------------- HANDLE MESSAGE ----------------
+# ---------------- MESSAGE HANDLER ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
@@ -108,21 +106,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not parsed:
         return await update.message.reply_text(
-            "Wrong input command.\n"
-            "Format:\n"
-            "[ProjectName] Delivery date: 26 May 2026 - Task message"
+            "Wrong input format.\n\n"
+            "Correct format:\n"
+            "ProjectName Delivery date: 26 May 2026"
         )
 
-    project, date, task = parsed
+    project, date = parsed
 
-    ok = save_reminder(project, task, date, chat_id)
+    ok = save_reminder(project, date, chat_id)
 
     if ok:
         await update.message.reply_text("Saved successfully.")
     else:
         await update.message.reply_text("Duplicate ignored.")
 
-# ---------------- ADMIN PANEL ----------------
+# ---------------- ADMIN ----------------
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Use: /admin <code>")
