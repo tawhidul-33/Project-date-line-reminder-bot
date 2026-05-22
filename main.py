@@ -73,6 +73,34 @@ def save_reminder(text, date, chat_id):
     )
     conn.commit()
 
+    # 🔥 LIVE LOG (Railway console এ দেখাবে)
+    cursor.execute("SELECT * FROM reminders")
+    data = cursor.fetchall()
+
+    print("✅ NEW DATA ADDED:")
+    print(data)
+
+
+
+
+
+
+def save_reminder(text, date, chat_id):
+    cursor.execute(
+        "INSERT INTO reminders (text, date, chat_id) VALUES (?, ?, ?)",
+        (text, date.strftime("%Y-%m-%d"), chat_id)
+    )
+    conn.commit()
+
+    # 🔥 THIS LINE ADDED
+    cursor.execute("SELECT * FROM reminders")
+    print("📦 UPDATED DB:", cursor.fetchall())
+
+
+
+
+
+
 # ---------------- GET ----------------
 def get_reminders():
     cursor.execute("SELECT id, text, date, chat_id, phase FROM reminders")
