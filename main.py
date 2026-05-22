@@ -2,25 +2,32 @@ import os
 import re
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
-
-# ---------------- LOGGING ----------------
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    filters
 )
 
-# ---------------- TOKEN ----------------
+# ---------------- LOGGING ----------------
+logging.basicConfig(level=logging.INFO)
+
+# ---------------- CONFIG ----------------
 TOKEN = os.getenv("BOT_TOKEN")
 
-if not TOKEN:
-    raise Exception("BOT_TOKEN is missing in Render Environment Variables")
+ADMIN_CODE = "1234"   # 🔐 change this
+ADMIN_USERS = set()
 
-# ---------------- DATABASE ----------------
-conn = sqlite3.connect("reminders.db", check_same_thread=False, timeout=10)
+if not TOKEN:
+    raise Exception("BOT_TOKEN missing")
+
+# ---------------- DB ----------------
+conn = sqlite3.connect("reminders.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -34,12 +41,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 """)
 conn.commit()
 
-# ---------------- DEBUG PRINT (RAILWAY LOGS) ----------------
-def print_all_data():
-    cursor.execute("SELECT * FROM reminders")
-    print("📦 DATABASE DATA:", cursor.fetchall())
-
-# ---------------- DATE PARSE ----------------
+# ---------------- DATE PARSER ----------------
 def extract_date(text):
     patterns = [
         r"(\d{1,2} \w+ \d{4})",
@@ -47,157 +49,164 @@ def extract_date(text):
     ]
 
     for p in patterns:
-        match = re.search(p, text)
-        if match:
+        m = re.search(p, text)
+        if m:
             try:
-                return datetime.strptime(match.group(1), "%d %B %Y")
+                return datetime.strptime(m.group(1), "%d %B %Y")
             except:
                 try:
-                    return datetime.strptime(match.group(1), "%Y-%m-%d")
+                    return datetime.strptime(m.group(1), "%Y-%m-%d")
                 except:
                     pass
     return None
 
 # ---------------- SAVE ----------------
 def save_reminder(text, date, chat_id):
-    cursor.execute(
-        "SELECT id FROM reminders WHERE text=? AND date=? AND chat_id=?",
-        (text, date.strftime("%Y-%m-%d"), chat_id)
-    )
+    date_str = date.strftime("%Y-%m-%d")
+
+    cursor.execute("""
+        SELECT id FROM reminders 
+        WHERE text=? AND date=? AND chat_id=?
+    """, (text, date_str, chat_id))
+
     if cursor.fetchone():
-        return
+        return False
 
-    cursor.execute(
-        "INSERT INTO reminders (text, date, chat_id) VALUES (?, ?, ?)",
-        (text, date.strftime("%Y-%m-%d"), chat_id)
-    )
+    cursor.execute("""
+        INSERT INTO reminders (text, date, chat_id)
+        VALUES (?, ?, ?)
+    """, (text, date_str, chat_id))
+
     conn.commit()
+    return True
 
-    # 🔥 LIVE LOG (Railway console এ দেখাবে)
+# ---------------- GET ALL ----------------
+def get_all():
     cursor.execute("SELECT * FROM reminders")
-    data = cursor.fetchall()
+    return cursor.fetchall()
 
-    print("✅ NEW DATA ADDED:")
-    print(data)
-
-
-
-
-
-
-def save_reminder(text, date, chat_id):
-    cursor.execute(
-        "INSERT INTO reminders (text, date, chat_id) VALUES (?, ?, ?)",
-        (text, date.strftime("%Y-%m-%d"), chat_id)
-    )
-    conn.commit()
-
-    # 🔥 THIS LINE ADDED
-    cursor.execute("SELECT * FROM reminders")
-    print("📦 UPDATED DB:", cursor.fetchall())
-
-
-
-
-
-
-# ---------------- GET ----------------
-def get_reminders():
-    cursor.execute("SELECT id, text, date, chat_id, phase FROM reminders")
-    rows = cursor.fetchall()
-
-    return [
-        {
-            "id": r[0],
-            "text": r[1],
-            "date": datetime.strptime(r[2], "%Y-%m-%d"),
-            "chat_id": r[3],
-            "phase": r[4]
-        }
-        for r in rows
-    ]
-
-# ---------------- MESSAGE HANDLER ----------------
+# ---------------- MESSAGE ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
     text = update.message.text
     chat_id = update.effective_chat.id
+
     date = extract_date(text)
 
     if date:
-        save_reminder(text, date, chat_id)
+        ok = save_reminder(text, date, chat_id)
 
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="✅ Saved!\n⏰ Reminder activated."
-        )
+        if ok:
+            await update.message.reply_text("✅ Saved successfully!")
+        else:
+            await update.message.reply_text("⚠️ Already exists!")
 
-# ---------------- CHECK REMINDERS ----------------
+# ---------------- SMART ALERT ----------------
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        now = datetime.now().date()
-        reminders = get_reminders()
+    now = datetime.now().date()
 
-        for r in reminders:
-            diff = (r["date"].date() - now).days
+    cursor.execute("SELECT id, text, date, chat_id, phase FROM reminders")
+    rows = cursor.fetchall()
 
-            if diff == 3 and r["phase"] != "3d":
-                cursor.execute("UPDATE reminders SET phase='3d' WHERE id=?", (r["id"],))
-                conn.commit()
+    for r in rows:
+        rid, text, date_str, chat_id, phase = r
+        rdate = datetime.strptime(date_str, "%Y-%m-%d").date()
+        diff = (rdate - now).days
 
-                await context.bot.send_message(
-                    chat_id=r["chat_id"],
-                    text=f"📢 3 DAYS LEFT\n\n{r['text']}"
-                )
+        # 3 DAYS ALERT (repeat every 3h)
+        if diff == 3:
+            cursor.execute("UPDATE reminders SET phase='3d' WHERE id=?", (rid,))
+            conn.commit()
 
-            elif diff == 2 and r["phase"] != "2d":
-                cursor.execute("UPDATE reminders SET phase='2d' WHERE id=?", (r["id"],))
-                conn.commit()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📢 3 DAYS LEFT\n\n{text}"
+            )
 
-                await context.bot.send_message(
-                    chat_id=r["chat_id"],
-                    text=f"⚠️ 2 DAYS LEFT\n\n{r['text']}"
-                )
+        # 2 DAYS ALERT (repeat every 3h)
+        elif diff == 2:
+            cursor.execute("UPDATE reminders SET phase='2d' WHERE id=?", (rid,))
+            conn.commit()
 
-            elif diff < 0:
-                await context.bot.send_message(
-                    chat_id=r["chat_id"],
-                    text=f"❌ DEADLINE OVER\nAuto removed\n\n{r['text']}"
-                )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ 2 DAYS LEFT\n\n{text}"
+            )
 
-                cursor.execute("DELETE FROM reminders WHERE id=?", (r["id"],))
-                conn.commit()
+        # DELETE ONCE ONLY
+        elif diff < 0 and phase != "deleted":
+            cursor.execute("UPDATE reminders SET phase='deleted' WHERE id=?", (rid,))
+            conn.commit()
 
-    except Exception as e:
-        logging.error(f"Reminder error: {e}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ DEADLINE OVER\n\n{text}"
+            )
 
-# ---------------- JOB START ----------------
+# ---------------- ADMIN ----------------
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("Use: /admin <code>")
+
+    code = context.args[0]
+
+    if code != ADMIN_CODE:
+        return await update.message.reply_text("❌ Wrong code")
+
+    ADMIN_USERS.add(update.effective_chat.id)
+
+    keyboard = [
+        [InlineKeyboardButton("📦 View DB", callback_data="db")],
+        [InlineKeyboardButton("📋 View Reminders", callback_data="rem")],
+        [InlineKeyboardButton("🧹 Clear DB", callback_data="clear")]
+    ]
+
+    await update.message.reply_text(
+        "✅ Admin Panel",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ---------------- BUTTON HANDLER ----------------
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = query.message.chat_id
+
+    if chat_id not in ADMIN_USERS:
+        return await query.edit_message_text("❌ Not authorized")
+
+    if query.data == "db":
+        data = get_all()
+        await query.edit_message_text(str(data))
+
+    elif query.data == "rem":
+        cursor.execute("SELECT text, date FROM reminders")
+        data = cursor.fetchall()
+        await query.edit_message_text(str(data))
+
+    elif query.data == "clear":
+        cursor.execute("DELETE FROM reminders")
+        conn.commit()
+        await query.edit_message_text("🧹 Database cleared!")
+
+# ---------------- JOB ----------------
 def start_jobs(app):
-    if app.job_queue:
-        app.job_queue.run_repeating(check_reminders, interval=10800, first=10)
-    else:
-        print("JobQueue not available")
+    app.job_queue.run_repeating(check_reminders, interval=10800, first=10)
 
 # ---------------- MAIN ----------------
 def main():
-    print("Starting bot...")
-
-    # 🔥 PRINT DATABASE ON START (RAILWAY LOGS)
-    print_all_data()
+    print("Bot starting...")
 
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(CallbackQueryHandler(buttons))
 
     start_jobs(app)
 
     print("Bot running...")
     app.run_polling()
 
-# ---------------- START ----------------
 if __name__ == "__main__":
     main()
