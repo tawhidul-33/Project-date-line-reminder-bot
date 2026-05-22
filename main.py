@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import logging
 from datetime import datetime
@@ -45,8 +46,7 @@ ON reminders(project, text, date, chat_id)
 
 conn.commit()
 
-# ---------------- STATE ----------------
-user_state = {}
+# ---------------- ADMIN ----------------
 ADMIN_USERS = set()
 
 # ---------------- DATE PARSER ----------------
@@ -58,6 +58,22 @@ def parse_date(text):
         except:
             pass
     return None
+
+# ---------------- PARSE INPUT ----------------
+def parse_input(text):
+    match = re.match(r"\[(.*?)\]\s*Delivery date:\s*(.*?)\s*-\s*(.*)", text)
+    if not match:
+        return None
+
+    project = match.group(1).strip()
+    date_str = match.group(2).strip()
+    task = match.group(3).strip()
+
+    date = parse_date(date_str)
+    if not date:
+        return None
+
+    return project, date, task
 
 # ---------------- SAVE ----------------
 def save_reminder(project, text, date, chat_id):
@@ -73,69 +89,40 @@ def save_reminder(project, text, date, chat_id):
     except sqlite3.IntegrityError:
         return False
 
-# ---------------- GET ----------------
-def get_all():
-    cursor.execute("SELECT * FROM reminders")
-    return cursor.fetchall()
-
 # ---------------- DELETE PROJECT ----------------
 def delete_project(project):
     cursor.execute("SELECT COUNT(*) FROM reminders WHERE project=?", (project,))
     count = cursor.fetchone()[0]
 
-    if count == 0:
-        return 0
-
     cursor.execute("DELETE FROM reminders WHERE project=?", (project,))
     conn.commit()
+
     return count
 
-# ---------------- /input FLOW ----------------
-async def input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_state[update.effective_chat.id] = {"step": "project"}
-    await update.message.reply_text("Project Name:")
-
-
+# ---------------- HANDLE MESSAGE ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_chat.id
     text = update.message.text
+    chat_id = update.effective_chat.id
 
-    if user_id not in user_state:
-        return
+    parsed = parse_input(text)
 
-    state = user_state[user_id]
+    if not parsed:
+        return await update.message.reply_text(
+            "Wrong input command.\n"
+            "Format:\n"
+            "[ProjectName] Delivery date: 26 May 2026 - Task message"
+        )
 
-    # STEP 1
-    if state["step"] == "project":
-        state["project"] = text
-        state["step"] = "date"
-        return await update.message.reply_text("Delivery Date (e.g. 26 May 2026):")
+    project, date, task = parsed
 
-    # STEP 2
-    if state["step"] == "date":
-        date = parse_date(text)
-        if not date:
-            return await update.message.reply_text("Invalid date format. Try again.")
+    ok = save_reminder(project, task, date, chat_id)
 
-        state["date"] = date
-        state["step"] = "text"
-        return await update.message.reply_text("Task Message:")
+    if ok:
+        await update.message.reply_text("Saved successfully.")
+    else:
+        await update.message.reply_text("Duplicate ignored.")
 
-    # STEP 3
-    if state["step"] == "text":
-        project = state["project"]
-        date = state["date"]
-
-        ok = save_reminder(project, text, date, user_id)
-
-        user_state.pop(user_id)
-
-        if ok:
-            await update.message.reply_text("Saved successfully.")
-        else:
-            await update.message.reply_text("Duplicate ignored.")
-
-# ---------------- ADMIN ----------------
+# ---------------- ADMIN PANEL ----------------
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Use: /admin <code>")
@@ -167,7 +154,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text("Not authorized")
 
     if query.data == "db":
-        await query.edit_message_text(str(get_all()))
+        cursor.execute("SELECT * FROM reminders")
+        await query.edit_message_text(str(cursor.fetchall()))
 
     elif query.data == "del":
         cursor.execute("SELECT DISTINCT project FROM reminders")
@@ -176,7 +164,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "\n".join([p[0] for p in projects]) or "No projects"
 
         await query.edit_message_text(
-            f"Projects:\n{text}\n\nUse /del project_name"
+            f"Projects:\n{text}\n\nUse: /del project_name"
         )
 
     elif query.data == "clear":
@@ -209,10 +197,8 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("input", input_cmd))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("del", delete_cmd))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(buttons))
 
