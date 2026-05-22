@@ -59,6 +59,8 @@ def parse_date(text):
 
 # ---------------- SAVE ----------------
 def save(user_id, project, date):
+    project = project.strip().lower()
+
     try:
         cursor.execute("""
             INSERT INTO reminders (user_id, project, text, date)
@@ -70,18 +72,18 @@ def save(user_id, project, date):
     except sqlite3.IntegrityError:
         return False
 
-# ---------------- GET USER DATA ----------------
+# ---------------- USER DATA ----------------
 def get_user_projects(user_id):
-    cursor.execute("SELECT DISTINCT project FROM reminders WHERE user_id=?", (user_id,))
-    return cursor.fetchall()
-
-# ---------------- GET ALL ----------------
-def get_all():
-    cursor.execute("SELECT * FROM reminders")
+    cursor.execute(
+        "SELECT DISTINCT project FROM reminders WHERE user_id=?",
+        (user_id,)
+    )
     return cursor.fetchall()
 
 # ---------------- DELETE USER PROJECT ----------------
 def delete_user_project(user_id, project):
+    project = project.strip().lower()
+
     cursor.execute(
         "SELECT COUNT(*) FROM reminders WHERE user_id=? AND project=?",
         (user_id, project)
@@ -92,18 +94,26 @@ def delete_user_project(user_id, project):
         "DELETE FROM reminders WHERE user_id=? AND project=?",
         (user_id, project)
     )
-    conn.commit()
 
+    conn.commit()
     return count
 
 # ---------------- ADMIN DELETE ----------------
 def admin_delete_project(project):
-    cursor.execute("SELECT DISTINCT user_id FROM reminders WHERE project=?", (project,))
+    project = project.strip().lower()
+
+    cursor.execute(
+        "SELECT DISTINCT user_id FROM reminders WHERE project=?",
+        (project,)
+    )
     users = cursor.fetchall()
 
-    cursor.execute("DELETE FROM reminders WHERE project=?", (project,))
-    conn.commit()
+    cursor.execute(
+        "DELETE FROM reminders WHERE project=?",
+        (project,)
+    )
 
+    conn.commit()
     return [u[0] for u in users]
 
 # ---------------- INPUT ----------------
@@ -111,12 +121,10 @@ async def input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     INPUT_MODE.add(update.effective_chat.id)
 
     await update.message.reply_text(
-        "Send exactly like this:\n\n"
-        "Project name: YOUR_PROJECT\n"
-        "Delivery date: 26 May 2026"
+        "Project name: YOUR_PROJECT\nDelivery date: 26 May 2026"
     )
 
-# ---------------- MESSAGE ----------------
+# ---------------- MESSAGE HANDLER ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
@@ -130,19 +138,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not match:
-            return await update.message.reply_text(
-                "❌ Wrong format\n\n"
-                "Project name: YOUR_PROJECT\n"
-                "Delivery date: 26 May 2026"
-            )
+            return await update.message.reply_text("❌ Wrong format")
 
-        project = match.group(1).strip()
+        project = match.group(1).strip().lower()
         date_text = match.group(2).strip()
 
         date = parse_date(date_text)
 
         if not date:
-            return await update.message.reply_text("❌ Invalid date format")
+            return await update.message.reply_text("❌ Invalid date")
 
         ok = save(chat_id, project, date.strftime("%Y-%m-%d"))
 
@@ -157,7 +161,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ---------------- USER DELETE ----------------
     if chat_id in DELETE_MODE:
-        project = text
+        project = text.strip().lower()
 
         deleted = delete_user_project(chat_id, project)
         DELETE_MODE.remove(chat_id)
@@ -165,14 +169,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if deleted == 0:
             return await update.message.reply_text("❌ Project not found")
 
-        return await update.message.reply_text(
-            f"🗑 Deleted: {project}\nRows removed: {deleted}"
-        )
+        return await update.message.reply_text(f"🗑 Deleted: {project}")
+
+    # ---------------- ADMIN DELETE FLOW ----------------
+    if chat_id in ADMIN_USERS and DELETE_MODE:
+        project = text.strip().lower()
+
+        users = admin_delete_project(project)
+        DELETE_MODE.remove(chat_id)
+
+        if not users:
+            return await update.message.reply_text("❌ Project not found")
+
+        for u in users:
+            try:
+                await context.bot.send_message(
+                    chat_id=u,
+                    text=f"❌ Your project '{project}' was deleted by admin"
+                )
+            except:
+                pass
+
+        return await update.message.reply_text("🗑 Deleted by admin")
 
 # ---------------- USER PANEL ----------------
 async def user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
     keyboard = [
         [InlineKeyboardButton("📂 My Projects", callback_data="my")],
         [InlineKeyboardButton("🗑 Delete Project", callback_data="mydel")],
@@ -210,11 +231,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = query.message.chat_id
 
-    # ---------------- USER ACTIONS ----------------
+    # ---------------- USER ----------------
     if query.data == "my":
         data = get_user_projects(chat_id)
         text = "\n".join([d[0] for d in data]) or "No projects"
-        return await query.edit_message_text("📂 Your Projects:\n\n" + text)
+        return await query.edit_message_text(text)
 
     if query.data == "mydel":
         DELETE_MODE.add(chat_id)
@@ -223,14 +244,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "myclear":
         cursor.execute("DELETE FROM reminders WHERE user_id=?", (chat_id,))
         conn.commit()
-        return await query.edit_message_text("🧹 Your data cleared!")
+        return await query.edit_message_text("🧹 Cleared")
 
-    # ---------------- ADMIN ACTIONS ----------------
+    # ---------------- ADMIN ----------------
     if chat_id not in ADMIN_USERS:
         return await query.edit_message_text("❌ Not authorized")
 
     if query.data == "db":
-        return await query.edit_message_text(str(get_all()))
+        cursor.execute("SELECT * FROM reminders")
+        return await query.edit_message_text(str(cursor.fetchall()))
 
     if query.data == "projects":
         cursor.execute("SELECT DISTINCT project FROM reminders")
@@ -242,19 +264,29 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT DISTINCT project FROM reminders")
         data = cursor.fetchall()
         text = "\n".join([d[0] for d in data])
-        return await query.edit_message_text(
-            "Send project name to delete:\n\n" + text
-        )
+        DELETE_MODE.add(chat_id)
+        return await query.edit_message_text("Send project name:\n\n" + text)
 
     if query.data == "clear":
+        cursor.execute("SELECT DISTINCT user_id FROM reminders")
+        users = cursor.fetchall()
+
         cursor.execute("DELETE FROM reminders")
         conn.commit()
-        return await query.edit_message_text("🧹 DB cleared!")
+
+        for u in users:
+            try:
+                await context.bot.send_message(
+                    chat_id=u[0],
+                    text="⚠️ All your data has been cleared by admin"
+                )
+            except:
+                pass
+
+        return await query.edit_message_text("🧹 DB cleared")
 
 # ---------------- MAIN ----------------
 def main():
-    print("Bot starting...")
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("input", input_cmd))
