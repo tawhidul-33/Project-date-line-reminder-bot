@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS reminders (
 """)
 conn.commit()
 
+# ---------------- DEBUG PRINT (RAILWAY LOGS) ----------------
+def print_all_data():
+    cursor.execute("SELECT * FROM reminders")
+    print("📦 DATABASE DATA:", cursor.fetchall())
+
 # ---------------- DATE PARSE ----------------
 def extract_date(text):
     patterns = [
@@ -150,6 +155,9 @@ def start_jobs(app):
 # ---------------- MAIN ----------------
 def main():
     print("Starting bot...")
+
+    # 🔥 PRINT DATABASE ON START (RAILWAY LOGS)
+    print_all_data()
 
     app = Application.builder().token(TOKEN).build()
 
