@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("BOT_TOKEN")
 
-ADMIN_CODE = "1234"   # 🔐 change this
+ADMIN_CODE = "13465"   # 🔐 change this
 ADMIN_USERS = set()
 
 if not TOKEN:
