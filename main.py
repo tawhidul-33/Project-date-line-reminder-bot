@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import logging
+import asyncio
 from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,7 +28,6 @@ ADMIN_DELETE_MODE = set()
 if not TOKEN:
     raise Exception("BOT_TOKEN missing")
 
-# ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
 
 # ---------------- DB ----------------
@@ -42,14 +42,8 @@ CREATE TABLE IF NOT EXISTS reminders (
     text TEXT,
     date TEXT,
     notified_3d INTEGER DEFAULT 0,
-    notified_2d INTEGER DEFAULT 0,
-    deleted INTEGER DEFAULT 0
+    notified_2d INTEGER DEFAULT 0
 )
-""")
-
-cursor.execute("""
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_reminder
-ON reminders(user_id, project, date)
 """)
 
 conn.commit()
@@ -73,181 +67,39 @@ def save(user_id, project, date):
 
         conn.commit()
         return True
-
     except sqlite3.IntegrityError:
         return False
 
-# ---------------- USER PROJECTS ----------------
-def get_user_projects(user_id):
-    cursor.execute(
-        "SELECT DISTINCT project FROM reminders WHERE user_id=?",
-        (user_id,)
-    )
+# ---------------- GET ----------------
+def get_all_tasks():
+    cursor.execute("SELECT id, user_id, project, date, notified_3d, notified_2d FROM reminders")
     return cursor.fetchall()
 
-# ---------------- DELETE USER PROJECT ----------------
-def delete_user_project(user_id, project):
-    project = project.strip().lower()
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM reminders WHERE user_id=? AND project=?",
-        (user_id, project)
-    )
-    count = cursor.fetchone()[0]
-
-    if count == 0:
-        return 0
-
-    cursor.execute(
-        "DELETE FROM reminders WHERE user_id=? AND project=?",
-        (user_id, project)
-    )
-
-    conn.commit()
-    return count
-
-# ---------------- ADMIN DELETE ----------------
-def admin_delete_project(project):
-    project = project.strip().lower()
-
-    cursor.execute(
-        "SELECT DISTINCT user_id FROM reminders WHERE project=?",
-        (project,)
-    )
-    users = cursor.fetchall()
-
-    if not users:
-        return []
-
-    cursor.execute(
-        "DELETE FROM reminders WHERE project=?",
-        (project,)
-    )
-
+# ---------------- DELETE ----------------
+def delete_task(task_id):
+    cursor.execute("DELETE FROM reminders WHERE id=?", (task_id,))
     conn.commit()
 
-    return [u[0] for u in users]
-
-# =========================================================
-# ⏰ AUTO REMINDER SYSTEM (NEW FEATURE)
-# =========================================================
-
-async def auto_checker(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-
-    cursor.execute("SELECT id, user_id, project, date, notified_3d, notified_2d FROM reminders")
-    rows = cursor.fetchall()
-
-    for r in rows:
-        rid, uid, project, date_str, n3, n2 = r
-
-        try:
-            due = datetime.strptime(date_str, "%Y-%m-%d")
-        except:
-            continue
-
-        diff = (due - now).days
-
-        # ---------------- 3 DAYS REMINDER ----------------
-        if diff <= 3 and n3 == 0:
-            try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=f"⏰ Reminder: '{project}' is due in 3 days"
-                )
-            except:
-                pass
-
-            cursor.execute(
-                "UPDATE reminders SET notified_3d=1 WHERE id=?",
-                (rid,)
-            )
-            conn.commit()
-
-        # ---------------- 2 DAYS REMINDER ----------------
-        if diff <= 2 and n2 == 0:
-            try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=f"⚠️ Reminder: '{project}' is due in 2 days"
-                )
-            except:
-                pass
-
-            cursor.execute(
-                "UPDATE reminders SET notified_2d=1 WHERE id=?",
-                (rid,)
-            )
-            conn.commit()
-
-        # ---------------- EXPIRED AUTO DELETE ----------------
-        if diff < 0:
-            try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=f"🗑 Your project '{project}' is expired and deleted automatically"
-                )
-            except:
-                pass
-
-            cursor.execute("DELETE FROM reminders WHERE id=?", (rid,))
-            conn.commit()
+# ---------------- USER PROJECTS ----------------
+def get_user_projects(user_id):
+    cursor.execute("SELECT DISTINCT project FROM reminders WHERE user_id=?", (user_id,))
+    return cursor.fetchall()
 
 # ---------------- INPUT ----------------
 async def input_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     INPUT_MODE.add(update.effective_chat.id)
 
     await update.message.reply_text(
-        "Project name: YOUR_PROJECT\n"
-        "Delivery date: 26 May 2026"
+        "Project name: YOUR_PROJECT\nDelivery date: 26 May 2026"
     )
 
-# ---------------- USER PANEL ----------------
-async def user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📂 My Projects", callback_data="my")],
-        [InlineKeyboardButton("🗑 Delete Project", callback_data="mydel")],
-        [InlineKeyboardButton("🧹 Clear My Data", callback_data="myclear")]
-    ]
-
-    await update.message.reply_text(
-        "👤 User Panel",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ---------------- ADMIN ----------------
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not context.args or context.args[0] != ADMIN_CODE:
-        return await update.message.reply_text("❌ Wrong code")
-
-    ADMIN_USERS.add(update.effective_chat.id)
-
-    keyboard = [
-        [InlineKeyboardButton("📦 View DB", callback_data="db")],
-        [InlineKeyboardButton("📂 View Projects", callback_data="projects")],
-        [InlineKeyboardButton("🗑 Delete Project", callback_data="adel")],
-        [InlineKeyboardButton("🧹 Clear DB", callback_data="clear")]
-    ]
-
-    await update.message.reply_text(
-        "👑 Admin Panel",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ---------------- MESSAGE HANDLER ----------------
+# ---------------- MESSAGE ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
 
     if chat_id in INPUT_MODE:
-
-        match = re.search(
-            r"Project name:\s*(.+)\s+Delivery date:\s*(.+)",
-            text,
-            re.IGNORECASE
-        )
+        match = re.search(r"Project name:\s*(.+)\s+Delivery date:\s*(.+)", text, re.IGNORECASE)
 
         if not match:
             return await update.message.reply_text("❌ Wrong format")
@@ -260,123 +112,102 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not date:
             return await update.message.reply_text("❌ Invalid date")
 
-        ok = save(chat_id, project, date.strftime("%Y-%m-%d"))
+        save(chat_id, project, date.strftime("%Y-%m-%d"))
 
         INPUT_MODE.remove(chat_id)
+        return await update.message.reply_text("✅ Saved successfully!")
 
-        if ok:
-            return await update.message.reply_text("✅ Saved successfully!")
+# ---------------- REMINDER ENGINE ----------------
+async def reminder_checker(app):
+    while True:
+        try:
+            tasks = get_all_tasks()
+            now = datetime.now().date()
 
-        return await update.message.reply_text("⚠️ Duplicate ignored!")
+            for task in tasks:
+                task_id, user_id, project, date_str, n3, n2 = task
 
-    if chat_id in USER_DELETE_MODE:
+                try:
+                    due = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except:
+                    continue
 
-        project = text.strip().lower()
-        deleted = delete_user_project(chat_id, project)
+                diff = (due - now).days
 
-        USER_DELETE_MODE.remove(chat_id)
+                # ---------------- 3 DAYS REMINDER ----------------
+                if diff == 3 and not n3:
+                    await app.bot.send_message(
+                        chat_id=user_id,
+                        text=f"⏰ Reminder: '{project}' due in 3 days!"
+                    )
+                    cursor.execute("UPDATE reminders SET notified_3d=1 WHERE id=?", (task_id,))
+                    conn.commit()
 
-        if deleted == 0:
-            return await update.message.reply_text("❌ Project not found")
+                # ---------------- 2 DAYS REMINDER ----------------
+                if diff == 2 and not n2:
+                    await app.bot.send_message(
+                        chat_id=user_id,
+                        text=f"⚠️ Reminder: '{project}' due in 2 days!"
+                    )
+                    cursor.execute("UPDATE reminders SET notified_2d=1 WHERE id=?", (task_id,))
+                    conn.commit()
 
-        return await update.message.reply_text(f"🗑 Deleted: {project}")
+                # ---------------- EXPIRED AUTO DELETE ----------------
+                if diff < 0:
+                    await app.bot.send_message(
+                        chat_id=user_id,
+                        text=f"❌ '{project}' expired and removed automatically"
+                    )
+                    delete_task(task_id)
 
-    if chat_id in ADMIN_DELETE_MODE:
+        except Exception as e:
+            print("Reminder error:", e)
 
-        project = text.strip().lower()
-        users = admin_delete_project(project)
+        await asyncio.sleep(10800)  # 3 hours
 
-        ADMIN_DELETE_MODE.remove(chat_id)
+# ---------------- ADMIN ----------------
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or context.args[0] != ADMIN_CODE:
+        return await update.message.reply_text("❌ Wrong code")
 
-        if not users:
-            return await update.message.reply_text("❌ Project not found")
+    ADMIN_USERS.add(update.effective_chat.id)
 
-        for user_id in users:
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"❌ Your project '{project}' was deleted by admin"
-                )
-            except:
-                pass
+    keyboard = [
+        [InlineKeyboardButton("📂 View Projects", callback_data="projects")]
+    ]
 
-        return await update.message.reply_text(f"🗑 Admin deleted: {project}")
+    await update.message.reply_text(
+        "👑 Admin Panel",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 # ---------------- BUTTONS ----------------
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     query = update.callback_query
     await query.answer()
-
-    chat_id = query.message.chat_id
-
-    if query.data == "my":
-        data = get_user_projects(chat_id)
-        text = "\n".join([d[0] for d in data]) or "No projects"
-        return await query.edit_message_text(text)
-
-    if query.data == "mydel":
-        USER_DELETE_MODE.add(chat_id)
-        return await query.edit_message_text("Send project name to delete:")
-
-    if query.data == "myclear":
-        cursor.execute("DELETE FROM reminders WHERE user_id=?", (chat_id,))
-        conn.commit()
-        return await query.edit_message_text("🧹 Cleared")
-
-    if chat_id not in ADMIN_USERS:
-        return await query.edit_message_text("❌ Not authorized")
-
-    if query.data == "db":
-        cursor.execute("SELECT * FROM reminders")
-        return await query.edit_message_text(str(cursor.fetchall()))
 
     if query.data == "projects":
         cursor.execute("SELECT DISTINCT project FROM reminders")
         data = cursor.fetchall()
-        text = "\n".join([d[0] for d in data])
-        return await query.edit_message_text(text or "No projects")
 
-    if query.data == "adel":
-        cursor.execute("SELECT DISTINCT project FROM reminders")
-        data = cursor.fetchall()
-        text = "\n".join([d[0] for d in data])
-        ADMIN_DELETE_MODE.add(chat_id)
-        return await query.edit_message_text("Send project name:\n\n" + text)
+        text = "\n".join([d[0] for d in data]) or "No projects"
 
-    if query.data == "clear":
-        cursor.execute("SELECT DISTINCT user_id FROM reminders")
-        users = cursor.fetchall()
-
-        cursor.execute("DELETE FROM reminders")
-        conn.commit()
-
-        for u in users:
-            try:
-                await context.bot.send_message(
-                    chat_id=u[0],
-                    text="⚠️ All your data was cleared by admin"
-                )
-            except:
-                pass
-
-        return await query.edit_message_text("🧹 DB cleared")
+        return await query.edit_message_text(text)
 
 # ---------------- MAIN ----------------
 def main():
-
     app = Application.builder().token(TOKEN).build()
 
-    # 🔥 AUTO CHECK EVERY 3 HOURS
-    app.job_queue.run_repeating(auto_checker, interval=10800, first=10)
-
     app.add_handler(CommandHandler("input", input_cmd))
-    app.add_handler(CommandHandler("user", user_panel))
     app.add_handler(CommandHandler("admin", admin))
 
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # background reminder task
+    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(reminder_checker(app)), interval=10800, first=10)
+
+    print("Bot running...")
     app.run_polling()
 
 if __name__ == "__main__":
