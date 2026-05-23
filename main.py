@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS reminders (
 )
 """)
 
-# reminder tracking columns
 try:
     cursor.execute("ALTER TABLE reminders ADD COLUMN notified_3d INTEGER DEFAULT 0")
 except:
@@ -171,6 +170,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
 
+    # ---------------- SAVE ----------------
     if chat_id in INPUT_MODE:
 
         match = re.search(r"Project name:\s*(.+)\s+Delivery date:\s*(.+)", text)
@@ -190,25 +190,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         INPUT_MODE.remove(chat_id)
 
-        return await update.message.reply_text(
-            "✅ Saved!" if ok else "⚠️ Duplicate ignored!"
-        )
+        if ok:
+            return await update.message.reply_text("✅ Saved successfully!")
+        else:
+            return await update.message.reply_text("⚠️ Duplicate ignored!")
 
+    # ---------------- USER DELETE ----------------
     if chat_id in USER_DELETE_MODE:
-        project = text.lower().strip()
-        delete_user_project(chat_id, project)
-        USER_DELETE_MODE.remove(chat_id)
-        return await update.message.reply_text("🗑 Deleted")
 
+        project = text.lower().strip()
+        deleted = delete_user_project(chat_id, project)
+
+        USER_DELETE_MODE.remove(chat_id)
+
+        if deleted == 0:
+            return await update.message.reply_text("❌ Your project not found")
+
+        return await update.message.reply_text("🗑 Deleted successfully")
+
+    # ---------------- ADMIN DELETE ----------------
     if chat_id in ADMIN_DELETE_MODE:
+
         project = text.lower().strip()
         users = admin_delete_project(project)
 
         ADMIN_DELETE_MODE.remove(chat_id)
 
+        if not users:
+            return await update.message.reply_text("❌ Project not found")
+
         for u in users:
             try:
-                await context.bot.send_message(u, f"❌ {project} deleted by admin")
+                await context.bot.send_message(
+                    u,
+                    f"❌ Your project '{project}' deleted by admin"
+                )
             except:
                 pass
 
@@ -236,29 +252,47 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "myclear":
         cursor.execute("DELETE FROM reminders WHERE user_id=?", (chat_id,))
         conn.commit()
-        return await q.edit_message_text("Cleared")
+        return await q.edit_message_text("🧹 Your data cleared")
 
     if chat_id not in ADMIN_USERS:
         return await q.edit_message_text("❌ Not authorized")
 
     if q.data == "db":
-        cursor.execute("SELECT * FROM reminders LIMIT 10")
-        return await q.edit_message_text(str(cursor.fetchall()))
+        cursor.execute("SELECT * FROM reminders")
+        return await q.edit_message_text(str(cursor.fetchall()[:10]))
 
     if q.data == "projects":
         cursor.execute("SELECT DISTINCT project FROM reminders")
         data = cursor.fetchall()
-        text = "\n".join([d[0] for d in data]) or "No projects"
-        return await q.edit_message_text(text)
+        return await q.edit_message_text("\n".join([d[0] for d in data]) or "No projects")
 
     if q.data == "adel":
         ADMIN_DELETE_MODE.add(chat_id)
-        return await q.edit_message_text("Send project name")
+        cursor.execute("SELECT DISTINCT project FROM reminders")
+        data = cursor.fetchall()
+        return await q.edit_message_text(
+            "Send project name:\n\n" + "\n".join([d[0] for d in data])
+        )
 
     if q.data == "clear":
+
+        cursor.execute("SELECT DISTINCT user_id FROM reminders")
+        users = cursor.fetchall()
+
         cursor.execute("DELETE FROM reminders")
         conn.commit()
-        return await q.edit_message_text("DB cleared")
+
+        # 🔥 FIXED: notify ALL users
+        for u in users:
+            try:
+                await context.bot.send_message(
+                    u[0],
+                    "⚠️ All your data was cleared by admin"
+                )
+            except:
+                pass
+
+        return await q.edit_message_text("🧹 Database cleared")
 
 # ---------------- REMINDER ENGINE ----------------
 async def reminder_engine(app):
@@ -270,8 +304,7 @@ async def reminder_engine(app):
 
             today = date.today()
 
-            for r in rows:
-                rid, uid, project, d, n3, n2 = r
+            for rid, uid, project, d, n3, n2 in rows:
 
                 try:
                     due = datetime.strptime(d, "%Y-%m-%d").date()
@@ -285,12 +318,12 @@ async def reminder_engine(app):
                     cursor.execute("UPDATE reminders SET notified_3d=1 WHERE id=?", (rid,))
                     conn.commit()
 
-                if diff == 2 and n2 == 0:
+                elif diff == 2 and n2 == 0:
                     await app.bot.send_message(uid, f"⚠️ {project} due in 2 days")
                     cursor.execute("UPDATE reminders SET notified_2d=1 WHERE id=?", (rid,))
                     conn.commit()
 
-                if diff < 0:
+                elif diff < 0:
                     await app.bot.send_message(uid, f"❌ {project} expired & deleted")
                     cursor.execute("DELETE FROM reminders WHERE id=?", (rid,))
                     conn.commit()
@@ -298,13 +331,12 @@ async def reminder_engine(app):
         except Exception as e:
             print("Reminder error:", e)
 
-        await asyncio.sleep(10800)  # 3 hours
+        await asyncio.sleep(10800)
 
-# ---------------- STARTUP FIX ----------------
+# ---------------- START ----------------
 async def post_init(app: Application):
     app.create_task(reminder_engine(app))
 
-# ---------------- MAIN ----------------
 def main():
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
